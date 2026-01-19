@@ -1,8 +1,8 @@
 # GEM Representative insicision Script
 
-Unified controller for generating representative profiles from geophysical (EC/MS) line measurements.
+The `RIs_v1.py` is a unified controller for generating representative profiles from geophysical (EC/MS) line measurements.
 
-This repository contains `RIs_v1.py`, a script that:
+The script:
 - Reads .xlsx files containing distance vs. measurement traces (one or more traces per sheet),
 - Interpolates all traces onto a common distance grid,
 - Computes a representative (mean) profile per sheet,
