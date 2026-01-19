@@ -32,4 +32,3 @@ Outputs:
 - Interpolated mean profiles per sheet as Excel files.
 - Plots of representative profiles.
 - Console ranking of frequencies by representativeness score.
-"""
