@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "GEM_representative_insicision"
+authors:
+  - name: "skokolakis"
+doi: "10.5281/zenodo.18302817"
+url: "https://doi.org/10.5281/zenodo.18302817"
+date-released: "2026-01-19"
