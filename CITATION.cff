@@ -1,23 +1,9 @@
 cff-version: "1.2.0"
 message: "If you use this software, please cite it as below."
-title: "GEM_representative_insicision"
-version: "v1.0.0"
-date-released: "2026-01-19"
 authors:
-  - name: "Stratos Kokolakis"
-  - ORCiD: https://orcid.org/0009-0002-5890-2907
-type: "software"
-url: "https://github.com/skokolakis/GEM_representative_insicision"
-abstract: "These Python scripts process GEM-2 SKI survey data collected along stream transects using multiple frequencies. It is designed to work with Excel files where each sheet corresponds to a frequency, and each column represents a separate measurement line along the stream."
-keywords: ["Python","GEM-2","SKI survey","stream transects","data processing"]
-preferred-citation:
-  - type: "bibtex"
-    text: |
-      @software{skokolakis_GEM_representative_insicision_2026,
-        title = {GEM_representative_insicision},
-        author = {skokolakis},
-        year = {2026},
-        url = {https://github.com/skokolakis/GEM_representative_insicision},
-        version = {v1.0.0},
-        note = {These Python scripts process GEM-2 SKI survey data collected along stream transects using multiple frequencies.}
-      }
+- family-names: Stratos
+- given-names: Kokolakis
+orcid: https://orcid.org/0009-0002-5890-2907
+title: GEM Representative Insicision script (GRIs)
+version: 1.0.0
+date-released: 2026-01-19
