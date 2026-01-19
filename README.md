@@ -188,8 +188,3 @@ Interpretation: higher score means the representative profile has a larger ampli
   - Add unit tests for interpolation and scoring logic.
 
 ---
-
-## License & contact
-
-- License: MIT (you can add a LICENSE file to the repo if desired).
-- Author / maintainer: skokolakis — open an issue or reach out via GitHub: [skokolakis](https://github.com/skokolakis)
