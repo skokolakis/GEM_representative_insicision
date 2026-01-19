@@ -1,9 +1,0 @@
-cff-version: "1.2.0"
-message: "If you use this software, please cite it as below."
-authors:
-- family-names: Stratos
-- given-names: Kokolakis
-orcid: https://orcid.org/0009-0002-5890-2907
-title: GEM Representative Insicision script (GRIs)
-version: 1.0.0
-date-released: 2026-01-19
