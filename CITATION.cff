@@ -4,7 +4,8 @@ title: "GEM_representative_insicision"
 version: "v1.0.0"
 date-released: "2026-01-19"
 authors:
-  - name: "skokolakis"
+  - name: "Stratos Kokolakis"
+  - ORCiD: https://orcid.org/0009-0002-5890-2907
 type: "software"
 url: "https://github.com/skokolakis/GEM_representative_insicision"
 abstract: "These Python scripts process GEM-2 SKI survey data collected along stream transects using multiple frequencies. It is designed to work with Excel files where each sheet corresponds to a frequency, and each column represents a separate measurement line along the stream."
