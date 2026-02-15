@@ -178,13 +178,3 @@ Interpretation: higher score means the representative profile has a larger ampli
 - If you need to support additional Excel engines, ensure `openpyxl` or other engines are installed.
 
 ---
-
-## Contributing
-
-- If you want to add features (e.g., CLI arguments, more robust file discovery, unit tests, or alternative scoring), please open an issue or submit a PR.
-- Suggested enhancements:
-  - Add CLI flags (argparse) for `INPUT_FOLDER`, `OUTPUT_FOLDER`, `COMMON_DISTANCE_STEP`, `INTERP_KIND`, and mode.
-  - Allow saving all per-trace interpolated results in the output Excel for debugging.
-  - Add unit tests for interpolation and scoring logic.
-
----
