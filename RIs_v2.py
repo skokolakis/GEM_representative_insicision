@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -30,8 +31,35 @@ MODES = {
     "MS": "Mean MS Response (10⁻⁵ SI)",
 }
 
+LINE_STYLES = {
+    "Solid": "-",
+    "Dashed": "--",
+    "Dash-dot": "-.",
+    "Dotted": ":",
+}
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Graph editor options
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GraphOptions:
+    """Visual settings collected from the graph editor panel."""
+    selected_sheets: list[str] = field(default_factory=list)  # empty → show all
+    x_lim: tuple[float, float] | None = None
+    y_lim: tuple[float, float] | None = None
+    show_grid: bool = True
+    line_width: float = 2.0
+    line_style: str = "-"
+    show_traces: bool = True
+    show_envelope: bool = True
+    plot_title: str = ""   # empty → use auto-generated default
+    x_label: str = ""      # empty → "Distance (m)"
+    y_label: str = ""      # empty → MODES[mode]
 
 
 # ---------------------------------------------------------------------------
@@ -209,23 +237,42 @@ def make_overview_figure(
     scores: dict[str, dict],
     mode: str,
     file_name: str,
+    opts: GraphOptions | None = None,
 ) -> plt.Figure:
     """All representative profiles on one axes."""
+    if opts is None:
+        opts = GraphOptions()
+
+    visible = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
+
     fig, ax = plt.subplots(figsize=(10, 5))
     y_label = MODES[mode]
 
-    for sheet_name, interp_df in output_data.items():
+    for sheet_name in visible:
+        interp_df = output_data.get(sheet_name)
+        if interp_df is None:
+            continue
         rep_prof = interp_df.mean(axis=1, skipna=True)
         common_dist = interp_df.index.values
         sc = scores[sheet_name]["score"]
         if not np.all(np.isnan(rep_prof.values)):
-            ax.plot(common_dist, rep_prof.values, label=f"{sheet_name} (score={sc:.2f})")
+            ax.plot(
+                common_dist,
+                rep_prof.values,
+                label=f"{sheet_name} (score={sc:.2f})",
+                linewidth=opts.line_width,
+                linestyle=opts.line_style,
+            )
 
-    ax.set_xlabel("Distance (m)")
-    ax.set_ylabel(y_label)
-    ax.set_title(f"Representative profiles [{mode}] — {file_name}")
+    ax.set_xlabel(opts.x_label or "Distance (m)")
+    ax.set_ylabel(opts.y_label or y_label)
+    ax.set_title(opts.plot_title or f"Representative profiles [{mode}] — {file_name}")
     ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.4)
+    ax.grid(opts.show_grid, alpha=0.4)
+    if opts.x_lim is not None:
+        ax.set_xlim(opts.x_lim)
+    if opts.y_lim is not None:
+        ax.set_ylim(opts.y_lim)
     fig.tight_layout()
     return fig
 
@@ -234,35 +281,59 @@ def make_sheet_figure(
     sheet_name: str,
     interp_df: pd.DataFrame,
     mode: str,
+    opts: GraphOptions | None = None,
 ) -> plt.Figure:
     """Per-sheet plot: individual traces + mean ± 1σ envelope."""
+    if opts is None:
+        opts = GraphOptions()
+
     fig, ax = plt.subplots(figsize=(10, 4))
     common_dist = interp_df.index.values
     rep_prof = interp_df.mean(axis=1, skipna=True).values
     std_prof = interp_df.std(axis=1, skipna=True).values
 
     # Individual traces (thin, semi-transparent)
-    for col in interp_df.columns:
-        ax.plot(common_dist, interp_df[col].values, color="steelblue", alpha=0.25, linewidth=0.8)
+    if opts.show_traces:
+        for col in interp_df.columns:
+            ax.plot(
+                common_dist,
+                interp_df[col].values,
+                color="steelblue",
+                alpha=0.25,
+                linewidth=0.8,
+                linestyle=opts.line_style,
+            )
 
     # Mean profile
-    ax.plot(common_dist, rep_prof, color="navy", linewidth=2, label="Mean")
-
-    # ±1σ envelope
-    ax.fill_between(
+    ax.plot(
         common_dist,
-        rep_prof - std_prof,
-        rep_prof + std_prof,
-        alpha=0.2,
+        rep_prof,
         color="navy",
-        label="±1σ",
+        linewidth=opts.line_width,
+        linestyle=opts.line_style,
+        label="Mean",
     )
 
-    ax.set_xlabel("Distance (m)")
-    ax.set_ylabel(MODES[mode])
+    # ±1σ envelope
+    if opts.show_envelope:
+        ax.fill_between(
+            common_dist,
+            rep_prof - std_prof,
+            rep_prof + std_prof,
+            alpha=0.2,
+            color="navy",
+            label="±1σ",
+        )
+
+    ax.set_xlabel(opts.x_label or "Distance (m)")
+    ax.set_ylabel(opts.y_label or MODES[mode])
     ax.set_title(f"{sheet_name} — individual traces & representative profile")
     ax.legend()
-    ax.grid(True, alpha=0.4)
+    ax.grid(opts.show_grid, alpha=0.4)
+    if opts.x_lim is not None:
+        ax.set_xlim(opts.x_lim)
+    if opts.y_lim is not None:
+        ax.set_ylim(opts.y_lim)
     fig.tight_layout()
     return fig
 
@@ -299,6 +370,141 @@ def fig_to_png(fig: plt.Figure) -> bytes:
     fig.savefig(buf, format="png", dpi=200)
     buf.seek(0)
     return buf.read()
+
+
+# ---------------------------------------------------------------------------
+# Graph editor UI helper
+# ---------------------------------------------------------------------------
+
+def render_graph_editor(
+    output_data: dict[str, pd.DataFrame],
+    file_key: str,
+) -> GraphOptions:
+    """
+    Render the graph editor expander and return the current GraphOptions.
+
+    Parameters
+    ----------
+    output_data : processed sheets for this file
+    file_key    : unique string used to namespace widget keys per file
+    """
+    all_sheet_names = list(output_data.keys())
+
+    # Compute data extents for axis-limit defaults
+    all_x = np.concatenate([df.index.values for df in output_data.values()])
+    all_y_means = np.concatenate(
+        [df.mean(axis=1, skipna=True).values for df in output_data.values()]
+    )
+    valid_y = all_y_means[np.isfinite(all_y_means)]
+    x_data_min, x_data_max = float(all_x.min()), float(all_x.max())
+    y_data_min = float(valid_y.min()) if len(valid_y) else 0.0
+    y_data_max = float(valid_y.max()) if len(valid_y) else 1.0
+
+    opts = GraphOptions()
+
+    with st.expander("✏️ Graph Editor", expanded=False):
+        col_sheets, col_style, col_axes = st.columns([2, 1, 2])
+
+        with col_sheets:
+            st.markdown("**Sheets**")
+            selected = st.multiselect(
+                "Visible sheets",
+                options=all_sheet_names,
+                default=all_sheet_names,
+                key=f"ge_sheets_{file_key}",
+                label_visibility="collapsed",
+            )
+            opts.selected_sheets = selected
+
+            st.markdown("**Detail plots**")
+            opts.show_traces = st.checkbox(
+                "Show individual traces",
+                value=True,
+                key=f"ge_traces_{file_key}",
+            )
+            opts.show_envelope = st.checkbox(
+                "Show ±1σ envelope",
+                value=True,
+                key=f"ge_envelope_{file_key}",
+            )
+
+        with col_style:
+            st.markdown("**Style**")
+            opts.show_grid = st.checkbox(
+                "Grid",
+                value=True,
+                key=f"ge_grid_{file_key}",
+            )
+            opts.line_width = st.slider(
+                "Line width",
+                min_value=0.5,
+                max_value=5.0,
+                value=2.0,
+                step=0.5,
+                key=f"ge_lw_{file_key}",
+            )
+            style_label = st.selectbox(
+                "Line style",
+                options=list(LINE_STYLES.keys()),
+                index=0,
+                key=f"ge_ls_{file_key}",
+            )
+            opts.line_style = LINE_STYLES[style_label]
+
+        with col_axes:
+            st.markdown("**X axis**")
+            x_auto = st.checkbox("Auto", value=True, key=f"ge_xauto_{file_key}")
+            if not x_auto:
+                xc1, xc2 = st.columns(2)
+                x_min = xc1.number_input(
+                    "Min", value=x_data_min, key=f"ge_xmin_{file_key}", format="%.2f"
+                )
+                x_max = xc2.number_input(
+                    "Max", value=x_data_max, key=f"ge_xmax_{file_key}", format="%.2f"
+                )
+                if x_min < x_max:
+                    opts.x_lim = (x_min, x_max)
+                else:
+                    st.caption("⚠️ X min must be < X max")
+
+            st.markdown("**Y axis**")
+            y_auto = st.checkbox("Auto", value=True, key=f"ge_yauto_{file_key}")
+            if not y_auto:
+                yc1, yc2 = st.columns(2)
+                y_min = yc1.number_input(
+                    "Min", value=y_data_min, key=f"ge_ymin_{file_key}", format="%.4g"
+                )
+                y_max = yc2.number_input(
+                    "Max", value=y_data_max, key=f"ge_ymax_{file_key}", format="%.4g"
+                )
+                if y_min < y_max:
+                    opts.y_lim = (y_min, y_max)
+                else:
+                    st.caption("⚠️ Y min must be < Y max")
+
+        st.divider()
+        st.markdown("**Labels & Title**")
+        lc1, lc2, lc3 = st.columns(3)
+        opts.plot_title = lc1.text_input(
+            "Overview plot title",
+            value="",
+            placeholder="Leave blank for default",
+            key=f"ge_title_{file_key}",
+        )
+        opts.x_label = lc2.text_input(
+            "X axis label",
+            value="",
+            placeholder="Distance (m)",
+            key=f"ge_xlabel_{file_key}",
+        )
+        opts.y_label = lc3.text_input(
+            "Y axis label",
+            value="",
+            placeholder=f"{next(iter(MODES.values()))} …",
+            key=f"ge_ylabel_{file_key}",
+        )
+
+    return opts
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +566,7 @@ def main():
     for uploaded_file in uploaded_files:
         st.divider()
         st.subheader(f"📄 {uploaded_file.name}")
+        stem = Path(uploaded_file.name).stem
 
         with st.spinner("Processing…"):
             output_data, scores, warnings = process_file(
@@ -420,27 +627,33 @@ def main():
             st.metric("Amplitude", f"{best_metrics['amplitude']:.4g}")
             st.metric("Mean Std", f"{best_metrics['mean_std']:.4g}")
 
+        # ── Graph editor ─────────────────────────────────────────────────────
+        opts = render_graph_editor(output_data, file_key=stem)
+
         # ── Overview plot ────────────────────────────────────────────────────
         st.markdown("### 📈 All representative profiles")
-        overview_fig = make_overview_figure(output_data, scores, mode, uploaded_file.name)
+        overview_fig = make_overview_figure(output_data, scores, mode, uploaded_file.name, opts)
         st.pyplot(overview_fig, use_container_width=True)
         plt.close(overview_fig)
 
         # ── Per-sheet detail ─────────────────────────────────────────────────
         with st.expander("🔍 Per-sheet detail plots", expanded=False):
-            for sheet_name, interp_df in output_data.items():
+            visible_sheets = opts.selected_sheets if opts.selected_sheets else list(output_data.keys())
+            for sheet_name in visible_sheets:
+                interp_df = output_data.get(sheet_name)
+                if interp_df is None:
+                    continue
                 sc = scores[sheet_name]
                 st.markdown(
                     f"**{sheet_name}** — score `{sc['score']:.2f}` | "
                     f"amp `{sc['amplitude']:.4g}` | std `{sc['mean_std']:.4g}`"
                 )
-                sheet_fig = make_sheet_figure(sheet_name, interp_df, mode)
+                sheet_fig = make_sheet_figure(sheet_name, interp_df, mode, opts)
                 st.pyplot(sheet_fig, use_container_width=True)
                 plt.close(sheet_fig)
 
         # ── Downloads ────────────────────────────────────────────────────────
         st.markdown("### 💾 Downloads")
-        stem = Path(uploaded_file.name).stem
         dl1, dl2, dl3 = st.columns(3)
 
         with dl1:
@@ -461,7 +674,7 @@ def main():
 
         with dl3:
             # Always regenerate a fresh figure for download (overview_fig is already closed above)
-            download_fig = make_overview_figure(output_data, scores, mode, uploaded_file.name)
+            download_fig = make_overview_figure(output_data, scores, mode, uploaded_file.name, opts)
             png_bytes = fig_to_png(download_fig)
             plt.close(download_fig)
             st.download_button(
