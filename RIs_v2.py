@@ -330,7 +330,9 @@ def process_sheet(
     interpolated_df.index.name = "Distance (m)"
 
     rep_prof = interpolated_df.mean(axis=1, skipna=True)
-    std_prof = interpolated_df.std(axis=1, skipna=True)
+    # Population std (ddof=0): the traces ARE the full population of survey
+    # passes, not a sample from a larger population.
+    std_prof = interpolated_df.std(axis=1, skipna=True, ddof=0)
 
     mean_std = float(std_prof.mean())
     amplitude = float(np.nanmax(rep_prof) - np.nanmin(rep_prof))
@@ -344,10 +346,13 @@ def process_sheet(
         smoothed = rep_prof.rolling(window=window, center=True, min_periods=1).mean()
         intra_noise = float((rep_prof - smoothed).std())
         mean_std = intra_noise  # store noise level so it appears in the UI
-        score = amplitude / max(intra_noise, SCORE_EPSILON)
+        if intra_noise < SCORE_EPSILON:
+            score = amplitude  # perfectly smooth data: score is raw amplitude
+        else:
+            score = amplitude / intra_noise
     else:
         # Multi-trace: score = signal range / between-trace variability (SNR)
-        score = amplitude / mean_std
+        score = amplitude / mean_std if mean_std > SCORE_EPSILON else amplitude
 
     score_dict = {"mean_std": mean_std, "amplitude": amplitude, "score": score}
     return interpolated_df, score_dict, None, col_warnings
@@ -745,9 +750,11 @@ def _render_mode_section(
             f"score {best_metrics['score']:.2f}",
             help=(
                 "Score = amplitude / noise (σ). "
-                "For multi-trace files, noise is the mean between-trace std. "
-                "For single-trace files, noise is the intra-profile residual std "
-                "after a rolling-window smoother. Higher score = cleaner, larger signal."
+                "Multi-trace: noise = population std across traces (ddof=0). "
+                "Single-trace: noise = residual std after removing the trend "
+                "with a rolling-window smoother. "
+                "If noise is zero, score equals the raw amplitude. "
+                "Higher score = cleaner, larger signal."
             ),
         )
         st.metric("Amplitude", f"{best_metrics['amplitude']:.4g}")
@@ -947,41 +954,235 @@ def main():
             st.markdown(
                 """
 **Representative Incision Tool** — v2.0
-Geophysical profile builder for multi-frequency EMI surveys.
+
+#### Geophysical background
+
+##### How EMI instruments work
+
+The GEM-2 (Won et al., 1996) is a **broadband frequency-domain
+EMI sensor**. A transmitter coil generates a time-varying
+primary magnetic field that induces eddy currents in conductive
+subsurface materials. Those currents produce a secondary magnetic
+field, which the receiver coil measures as a complex voltage
+ratio relative to the primary.
+
+Under the **low-induction-number (LIN) approximation**
+(McNeill, 1980) — valid when the ratio of coil separation to
+skin depth is much less than 1 — the two components of the
+secondary field decouple cleanly:
+
+| Component | Physical quantity | Unit |
+|---|---|---|
+| **Quadrature** (out-of-phase) | Apparent electrical conductivity (EC) | mS/m |
+| **In-phase** | Apparent magnetic susceptibility (MS) | ×10⁻⁵ SI (dimensionless) |
+
+This separation means a single instrument pass simultaneously
+maps two independent subsurface properties.
+
+##### What EC tells you
+
+**Electrical conductivity** reflects how easily electrical
+current flows through the bulk soil. It is controlled by:
+
+- **Moisture content** — water greatly increases EC
+- **Clay content and mineralogy** — clays with high CEC
+  (e.g. smectite) are strongly conductive
+- **Salinity** — dissolved ions are the primary charge carriers
+- **Soil texture** — fine-grained materials retain more water
+  and conduct better than coarse sands or gravels
+
+High EC values indicate fine-grained, moist, saline, or
+clay-rich substrates. Low values indicate dry, sandy, or
+gravelly soils (Reynolds, 2011).
+
+##### What MS tells you
+
+**Magnetic susceptibility** measures how strongly the soil is
+magnetised by the primary field. Elevated MS is associated with:
+
+- **Ferrimagnetic minerals** — especially maghemite (γ-Fe₂O₃)
+  and magnetite (Fe₃O₄)
+- **Pedogenic enhancement** — topsoil MS is often higher than
+  subsoil due to bacterial reduction–oxidation cycles forming
+  fine-grained magnetite
+- **Burning and anthropogenic enrichment** — fired hearths,
+  kilns, and iron-rich fills are classic high-MS targets in
+  archaeological surveys
+- **Mafic lithologies** — basaltic parent material produces
+  naturally elevated background MS
+
+##### Why frequency matters
+
+The **skin depth** δ (in metres) is the depth at which the
+primary field amplitude falls to 1/e ≈ 37 % of its surface
+value:
+
+$$\\delta = \\sqrt{\\frac{2}{\\omega \\mu \\sigma}}$$
+
+where ω is angular frequency, μ is magnetic permeability, and
+σ is electrical conductivity. Because δ ∝ f⁻¹/², **lower
+frequencies penetrate deeper** while **higher frequencies are
+more sensitive to the shallow subsurface** (Callegary et al.,
+2007). At a given site the optimal frequency is therefore
+site-specific: it depends on the depth of the target and the
+background conductivity.
+
+The LIN approximation holds when the induction number
+B = s/δ ≪ 1, where s is the coil separation. At high
+frequencies or in very conductive soils this condition breaks
+down and the linear relationship between signal and subsurface
+properties no longer holds. The tool's scoring is most reliable
+when the LIN condition is satisfied across all tested
+frequencies.
+
+##### What a representative incision is
+
+A **representative incision** is a carefully chosen survey
+transect, typically 50–200 m long, that crosses the main
+geophysical contrasts expected across the site — for example,
+running from a known high-EC wetland fringe into a low-EC
+sandy terrace. Repeated passes (at least two) along the same
+line allow assessment of instrument drift, operator-induced
+variability, and short-term environmental noise. This replicated
+design is what makes the between-trace standard deviation a
+meaningful noise estimate.
 
 ---
 
-#### How it works
-1. **Upload** a GEM instrument file (`.csv` or `.xlsx`) or a legacy multi-sheet Excel file.
-2. Each measurement frequency is interpolated onto a common distance grid.
-3. Frequencies are **ranked** by a signal-to-noise score:
+#### Scoring methodology
 
-$$\\text{Score} = \\frac{\\text{Amplitude}}{\\sigma_{\\text{noise}}}$$
+Each frequency receives a **representativeness score**:
 
-- **Multi-trace files** — σ is the mean between-trace standard deviation (trace-to-trace consistency).
-- **Single-trace files** — σ is the intra-profile residual noise estimated via a rolling-window smoother.
+$$\\text{Score} = \\frac{A}{\\sigma_{\\text{noise}}}$$
 
-A **higher score** means larger geophysical contrast relative to noise — i.e. a more *representative* and reliable frequency for that incision.
+| Symbol | Meaning |
+|---|---|
+| **A** | Signal amplitude — the peak-to-trough range of the mean profile: max(p̄) − min(p̄). Captures the total geophysical contrast resolved at that frequency. |
+| **σ_noise** | Noise — estimated from the data depending on how many passes were acquired (see below). |
+
+A higher score means the frequency resolves large subsurface
+contrasts clearly above the noise level. This is equivalent to a
+high signal-to-noise ratio (SNR), the standard geophysical
+criterion for data quality (Sheriff & Geldart, 1995).
+
+**How noise is estimated:**
+
+**With ≥ 2 passes (recommended):**
+σ is the mean of the point-wise population standard deviation
+computed across all traces at each distance step. Because the
+traces represent the complete set of survey passes — not a
+sample from a larger population — the population formula
+(ddof = 0) is appropriate. This σ captures all sources of
+between-pass variability: instrument noise, positioning
+uncertainty, and short-term drift.
+
+**With 1 pass only (single-trace fallback):**
+Between-trace σ is undefined, so the tool estimates intra-profile
+noise by subtracting a rolling-mean smoother (window =
+max(5, N/10) samples) from the profile and computing the
+standard deviation of the residuals. This decomposes the signal
+into a slowly varying geological trend and a high-frequency
+noise component, using only the latter as σ. This approach is
+analogous to the residual-noise estimators used in single-channel
+seismic quality assessment (Bakulin et al., 2022). Note that
+single-trace scores are less reliable — multiple passes are
+always preferable.
+
+**Near-zero noise fallback:**
+When σ < 10⁻⁸ (effectively zero — e.g. a perfectly flat synthetic
+trace), the score collapses to the raw amplitude A to avoid
+numerical instability. This edge case does not arise with real
+field data.
 
 ---
 
-#### Supported instruments & formats
+#### Processing pipeline
+
+| Step | What happens |
+|---|---|
+| **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`). The flat GEM table is pivoted: each frequency becomes a matrix with distance as rows and survey lines as columns. |
+| **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). Available methods: linear, nearest-neighbour, quadratic spline, and cubic spline. Duplicate distance values are averaged before interpolation. |
+| **3. Score** | The mean profile and noise metric are computed as above. Frequencies are ranked by descending score. |
+| **4. Visualise** | An overview plot shows all mean profiles together. Per-frequency plots show individual traces (thin, semi-transparent), the mean profile (bold), and the ±1σ envelope. |
+| **5. Export** | A scored summary table and the interpolated profiles are available for download as XLSX. |
+
+> **Precision note:** GEM CSV exports round EC values to integers
+> and MS to one decimal place, discarding the instrument's full
+> precision (3+ decimal places available in the XLSX). For
+> quantitative frequency comparison, always use the XLSX export.
+
+---
+
+#### Supported file formats
+
 | Format | Notes |
 |---|---|
-| GEM-2 `.csv` | Integer-rounded EC values (reduced precision) |
-| GEM-2 `.xlsx` | Full instrument precision — **recommended** |
-| Legacy multi-sheet `.xlsx` | One sheet per frequency, col 0 = distance |
+| **GEM-2 `.xlsx`** | Full instrument precision — recommended for scoring |
+| **GEM-2 `.csv`** | EC rounded to integers; may slightly affect scores |
+| **Legacy `.xlsx`** | One sheet per frequency; column 0 = distance (m), columns 1+ = survey traces |
 
-> ⚠️ GEM `.csv` exports round EC values to integers, which causes scores to differ slightly from the `.xlsx` equivalent. Always prefer `.xlsx` for quantitative comparison.
+---
+
+#### Glossary
+
+| Term | Definition |
+|---|---|
+| **EC** | Apparent electrical conductivity (mS/m) — quadrature EMI response |
+| **MS** | Apparent magnetic susceptibility (×10⁻⁵ SI) — in-phase EMI response |
+| **EMI** | Frequency-domain electromagnetic induction |
+| **LIN** | Low induction number approximation — the condition under which EC and MS decouple linearly (McNeill, 1980) |
+| **Skin depth (δ)** | Depth at which primary field amplitude falls to 1/e; decreases with frequency and conductivity |
+| **GEM-2** | Multi-frequency broadband EMI sensor (Won et al., 1996) |
+| **SNR** | Signal-to-noise ratio |
+| **Score** | A / σ_noise — the representativeness metric used for frequency ranking |
+| **Amplitude (A)** | max − min of the mean profile across all passes |
+| **σ_noise** | Population std across traces (multi-pass) or residual std from smoother (single-pass) |
+| **ddof = 0** | Population standard deviation; used because the survey passes are the full measurement ensemble, not a sample |
+| **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
 
 ---
 
 #### References
-- Won, I.J., Keiswetter, D.A., Fields, G.R.A. & Sutton, L.C. (1996). GEM-2: A new multifrequency electromagnetic sensor. *Journal of Environmental and Engineering Geophysics*, **1**(2), 129–137. https://doi.org/10.4133/JEEG1.2.129
-- McNeill, J.D. (1980). *Electromagnetic terrain conductivity measurement at low induction numbers*. Technical Note TN-6, Geonics Limited, Mississauga, Canada.
-- Delefortrie, S., Saey, T., Van De Vijver, E., De Smedt, P., Missiaen, T., Demerre, I. & Van Meirvenne, M. (2014). Frequency domain electromagnetic induction survey in the intertidal zone: data acquisition and correction procedures. *Journal of Applied Geophysics*, **100**, 119–130. https://doi.org/10.4133/JEEG1.2.129
-- Callegary, J.B., Ferré, T.P.A. & Groom, R.W. (2007). Vertical spatial sensitivity and exploration depth of low-induction-number electromagnetic induction instruments. *Vadose Zone Journal*, **6**(1), 158–167. https://doi.org/10.2136/vzj2006.0120
-- Reynolds, J.M. (2011). *An Introduction to Applied and Environmental Geophysics* (2nd ed.). Wiley-Blackwell.
+
+- Won, I.J., Keiswetter, D.A., Fields, G.R.A. & Sutton, L.C.
+  (1996). GEM-2: A new multifrequency electromagnetic sensor.
+  *J. Environ. Eng. Geophys.*, **1**(2), 129–137.
+  [doi:10.4133/JEEG1.2.129](https://doi.org/10.4133/JEEG1.2.129)
+
+- McNeill, J.D. (1980). *Electromagnetic terrain conductivity
+  measurement at low induction numbers*. Technical Note TN-6,
+  Geonics Limited, Mississauga, Canada.
+
+- Callegary, J.B., Ferré, T.P.A. & Groom, R.W. (2007).
+  Vertical spatial sensitivity and exploration depth of
+  low-induction-number electromagnetic-induction instruments.
+  *Vadose Zone J.*, **6**(1), 158–167.
+  [doi:10.2136/vzj2006.0120](https://doi.org/10.2136/vzj2006.0120)
+
+- Delefortrie, S., Saey, T., Van De Vijver, E., De Smedt, P.,
+  Missiaen, T., Demerre, I. & Van Meirvenne, M. (2014).
+  Frequency domain electromagnetic induction survey in the
+  intertidal zone: Limitations of low-induction-number and
+  depth of exploration. *J. Appl. Geophys.*, **100**, 119–130.
+  [doi:10.1016/j.jappgeo.2013.10.017](https://doi.org/10.1016/j.jappgeo.2013.10.017)
+
+- De Smedt, P., Van Meirvenne, M., Herremans, D., De Reu, J.,
+  Saey, T., Meerschman, E., Crombé, P. & De Clercq, W. (2013).
+  The 3-D reconstruction of medieval wetland reclamation through
+  electromagnetic induction survey. *Scientific Reports*,
+  **3**, 1517.
+  [doi:10.1038/srep01517](https://doi.org/10.1038/srep01517)
+
+- Reynolds, J.M. (2011). *An Introduction to Applied and
+  Environmental Geophysics* (2nd ed.). Wiley-Blackwell.
+
+- Sheriff, R.E. & Geldart, L.P. (1995). *Exploration
+  Seismology* (2nd ed.). Cambridge University Press.
+
+- Bakulin, A., Silvestrov, I. & Protasov, M. (2022).
+  Signal-to-noise ratio computation for challenging land data.
+  *Geophys. Prospect.*, **70**, 629–638.
+  [doi:10.1111/1365-2478.13183](https://doi.org/10.1111/1365-2478.13183)
                 """
             )
 
