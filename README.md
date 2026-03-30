@@ -6,13 +6,13 @@
 
 ### Key Features
 
-- 🔄 **Dual-format support**: Upload GEM instrument data as `.csv` or `.xlsx` (full precision)
-- 📊 **Intelligent ranking**: Frequencies ranked by signal-to-noise score (amplitude ÷ noise)
-- 🎨 **Interactive graph editor**: Customize axis limits, line styles, titles, and visibility
-- 📥 **Multi-format downloads**: Export interpolated profiles (XLSX), scores (CSV), and plots (PNG)
-- 🔍 **Per-frequency detail plots**: Individual traces with mean ± 1σ envelope
-- ⚙️ **Flexible interpolation**: Linear, cubic, nearest-neighbor, or quadratic methods
-- ⚠️ **Data quality warnings**: Auto-detects and warns about precision loss in CSV exports
+- **Dual-format support**: Upload GEM instrument data as `.csv` or `.xlsx` (full precision)
+- **Intelligent ranking**: Frequencies ranked by signal-to-noise score (amplitude ÷ noise)
+- **Interactive graph editor**: Customize axis limits, line styles, titles, and visibility
+- **Multi-format downloads**: Export interpolated profiles (XLSX), scores (CSV), and plots (PNG)
+- **Per-frequency detail plots**: Individual traces with mean ± 1σ envelope
+- **Flexible interpolation**: Linear, cubic, nearest-neighbor, or quadratic methods
+- **Data quality warnings**: Auto-detects and warns about precision loss in CSV exports
 
 ---
 
