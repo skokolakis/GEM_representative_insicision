@@ -3,8 +3,9 @@ UltraRank Frequency — Streamlit UI
 Refactored from RIs_v1.py
 
 Run with:
-    streamlit run RIs_v2_streamlit.py
+    streamlit run RIs_v2.py
 """
+from __future__ import annotations
 
 import io
 import logging
@@ -14,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.interpolate import interp1d
+from scipy.interpolate import CubicSpline, make_interp_spline
 
 # ---------------------------------------------------------------------------
 # Configuration (all in one place, easily overridden via Streamlit widgets)
@@ -22,6 +23,7 @@ from scipy.interpolate import interp1d
 DEFAULT_DISTANCE_STEP = 0.5
 DEFAULT_INTERP_KIND = "linear"
 SCORE_EPSILON = 1e-8
+EXCEL_SHEET_NAME_MAX = 31
 
 MODES = {
     "EC": "Mean EC Response (S/m)",
@@ -40,7 +42,7 @@ def process_sheet(
     df: pd.DataFrame,
     distance_step: float = DEFAULT_DISTANCE_STEP,
     interp_kind: str = DEFAULT_INTERP_KIND,
-) -> tuple[pd.DataFrame | None, dict | None, str | None]:
+) -> tuple[pd.DataFrame | None, dict | None, str | None, list[str]]:
     """
     Process a single sheet.
 
@@ -49,25 +51,28 @@ def process_sheet(
     interpolated_df : DataFrame indexed by common distance, columns = original trace columns
     score_dict      : {"mean_std": float, "amplitude": float, "score": float}
     error           : human-readable reason for failure, or None on success
+    col_warnings    : list of per-column warning strings surfaced to the UI
     """
+    col_warnings: list[str] = []
+
     if df.shape[1] < 2:
-        return None, None, "fewer than 2 columns"
+        return None, None, "fewer than 2 columns", col_warnings
 
     distance = pd.to_numeric(df.iloc[:, 0], errors="coerce").values
     line_data = df.iloc[:, 1:].apply(pd.to_numeric, errors="coerce")
 
     if np.all(np.isnan(distance)):
-        return None, None, "distance column is all NaN"
+        return None, None, "distance column is all NaN", col_warnings
 
     min_dist = float(np.nanmin(distance))
     max_dist = float(np.nanmax(distance))
 
     if not (np.isfinite(min_dist) and np.isfinite(max_dist)):
-        return None, None, "non-finite distance range"
+        return None, None, "non-finite distance range", col_warnings
 
     span = max_dist - min_dist
     if span < distance_step:
-        return None, None, f"distance span ({span:.2f} m) < step ({distance_step} m)"
+        return None, None, f"distance span ({span:.2f} m) < step ({distance_step} m)", col_warnings
 
     # Use linspace to avoid float accumulation past max_dist
     n_points = int(round(span / distance_step)) + 1
@@ -88,27 +93,49 @@ def process_sheet(
             .groupby("d", as_index=False)
             .mean()
             .sort_values("d")
+            .drop_duplicates(subset="d")
         )
+
+        if not df_xy["d"].is_monotonic_increasing:
+            col_warnings.append(f"column '{col}': distance not monotonic after dedup, skipped")
+            continue
 
         if df_xy.shape[0] < 2:
             continue
 
+        xp = df_xy["d"].values
+        yp = df_xy["y"].values
+
         try:
-            f = interp1d(
-                df_xy["d"].values,
-                df_xy["y"].values,
-                kind=interp_kind,
-                bounds_error=False,
-                fill_value=np.nan,
-                assume_sorted=True,
-            )
-            interpolated_lines[col] = f(common_dist)
+            if interp_kind == "linear":
+                interpolated_lines[col] = np.interp(common_dist, xp, yp)
+            elif interp_kind == "nearest":
+                idx = np.searchsorted(xp, common_dist, side="left")
+                idx_left = np.clip(idx - 1, 0, len(xp) - 1)
+                idx_right = np.clip(idx, 0, len(xp) - 1)
+                nearest = np.where(
+                    np.abs(common_dist - xp[idx_left]) <= np.abs(common_dist - xp[idx_right]),
+                    idx_left,
+                    idx_right,
+                )
+                interpolated_lines[col] = yp[nearest]
+            elif interp_kind == "quadratic":
+                if len(xp) < 3:
+                    col_warnings.append(
+                        f"column '{col}': need ≥3 points for quadratic interpolation, skipped"
+                    )
+                    continue
+                spl = make_interp_spline(xp, yp, k=2)
+                interpolated_lines[col] = spl(common_dist)
+            elif interp_kind == "cubic":
+                spl = CubicSpline(xp, yp)
+                interpolated_lines[col] = spl(common_dist)
         except Exception as exc:
-            log.warning("  Interpolation failed for column %s: %s", col, exc)
+            col_warnings.append(f"column '{col}': interpolation failed — {exc}")
             continue
 
     if not interpolated_lines:
-        return None, None, "no columns survived interpolation"
+        return None, None, "no columns survived interpolation", col_warnings
 
     interpolated_df = pd.DataFrame(interpolated_lines, index=common_dist)
     interpolated_df.index.name = "Distance (m)"
@@ -121,9 +148,10 @@ def process_sheet(
     score = amplitude / max(mean_std, SCORE_EPSILON)
 
     score_dict = {"mean_std": mean_std, "amplitude": amplitude, "score": score}
-    return interpolated_df, score_dict, None
+    return interpolated_df, score_dict, None, col_warnings
 
 
+@st.cache_data(show_spinner=False)
 def process_file(
     excel_bytes: bytes,
     mode: str,
@@ -135,9 +163,9 @@ def process_file(
 
     Returns
     -------
-    output_data            : {sheet_name: interpolated_df}
+    output_data               : {sheet_name: interpolated_df}
     representativeness_scores : {sheet_name: score_dict}
-    warnings               : list of warning strings
+    warnings                  : list of warning strings
     """
     output_data: dict[str, pd.DataFrame] = {}
     scores: dict[str, dict] = {}
@@ -150,13 +178,17 @@ def process_file(
         return output_data, scores, warnings
 
     for sheet_name in excel.sheet_names:
+        sheet_name = str(sheet_name)  # guard against integer sheet names (e.g. 9000)
         try:
             df = pd.read_excel(excel, sheet_name=sheet_name)
         except Exception as exc:
             warnings.append(f"Sheet '{sheet_name}': read error — {exc}")
             continue
 
-        interp_df, score_dict, error = process_sheet(df, distance_step, interp_kind)
+        interp_df, score_dict, error, col_warnings = process_sheet(df, distance_step, interp_kind)
+
+        for w in col_warnings:
+            warnings.append(f"Sheet '{sheet_name}': {w}")
 
         if error:
             warnings.append(f"Sheet '{sheet_name}': skipped — {error}")
@@ -239,19 +271,20 @@ def make_sheet_figure(
 # Export helpers
 # ---------------------------------------------------------------------------
 
-def build_excel_download(output_data: dict[str, pd.DataFrame], mode: str) -> bytes:
+def build_excel_download(output_data: dict[str, pd.DataFrame]) -> bytes:
     """Pack all interpolated sheets into a single Excel workbook."""
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         for sheet_name, interp_df in output_data.items():
             rep_prof = interp_df.mean(axis=1, skipna=True)
+            col_label = f"{sheet_name[:EXCEL_SHEET_NAME_MAX - 5]}_mean"
             out_df = pd.DataFrame(
                 {
                     "Distance (m)": interp_df.index.values,
-                    f"{sheet_name[:28]}_mean": rep_prof.values,  # cap at 28 chars (Excel limit 31)
+                    col_label: rep_prof.values,
                 }
             )
-            out_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+            out_df.to_excel(writer, sheet_name=sheet_name[:EXCEL_SHEET_NAME_MAX], index=False)
     return buf.getvalue()
 
 
@@ -303,6 +336,12 @@ def main():
             index=0,
         )
 
+        if distance_step > 10.0:
+            st.warning(
+                f"Distance step is {distance_step:.2f} m. "
+                "If your data spans less than this, all sheets will be skipped."
+            )
+
         st.divider()
         st.markdown("**Output files are available for download after processing.**")
 
@@ -324,7 +363,7 @@ def main():
 
         with st.spinner("Processing…"):
             output_data, scores, warnings = process_file(
-                uploaded_file.read(),
+                uploaded_file.getvalue(),
                 mode,
                 distance_step=distance_step,
                 interp_kind=interp_kind,
@@ -338,18 +377,25 @@ def main():
 
         if not output_data:
             st.error("No usable sheets found in this file.")
+            if distance_step > 1.0:
+                st.info("Try reducing the distance step in the sidebar.")
             continue
 
         # ── Ranking table ───────────────────────────────────────────────────
         ranking = sorted(scores.items(), key=lambda x: x[1]["score"], reverse=True)
+
+        if not ranking:
+            st.error("No sheets could be scored.")
+            continue
+
         rank_df = pd.DataFrame(
             [
                 {
                     "Rank": i,
                     "Frequency / Sheet": name,
-                    "Score": f"{m['score']:.2f}",
-                    "Amplitude": f"{m['amplitude']:.4g}",
-                    "Mean Std": f"{m['mean_std']:.4g}",
+                    "Score": round(m["score"], 2),
+                    "Amplitude": round(m["amplitude"], 6),
+                    "Mean Std": round(m["mean_std"], 6),
                 }
                 for i, (name, m) in enumerate(ranking, 1)
             ]
@@ -358,10 +404,19 @@ def main():
         col_table, col_best = st.columns([3, 1])
         with col_table:
             st.markdown("### 🏆 Frequency Ranking")
-            st.dataframe(rank_df, use_container_width=True, hide_index=True)
+            st.dataframe(
+                rank_df.style.background_gradient(subset=["Score"], cmap="RdYlGn"),
+                use_container_width=True,
+                hide_index=True,
+            )
         with col_best:
             best_name, best_metrics = ranking[0]
-            st.metric("Best frequency", best_name, f"score {best_metrics['score']:.2f}")
+            st.metric(
+                "Best frequency",
+                best_name,
+                f"score {best_metrics['score']:.2f}",
+                help="Score = amplitude / mean_std. Higher means a large signal range relative to noise.",
+            )
             st.metric("Amplitude", f"{best_metrics['amplitude']:.4g}")
             st.metric("Mean Std", f"{best_metrics['mean_std']:.4g}")
 
@@ -391,7 +446,7 @@ def main():
         with dl1:
             st.download_button(
                 label="📥 Interpolated profiles (.xlsx)",
-                data=build_excel_download(output_data, mode),
+                data=build_excel_download(output_data),
                 file_name=f"{stem}_{mode}_interpolated.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
@@ -405,9 +460,10 @@ def main():
             )
 
         with dl3:
-            png_bytes = fig_to_png(overview_fig if not overview_fig.axes else make_overview_figure(
-                output_data, scores, mode, uploaded_file.name
-            ))
+            # Always regenerate a fresh figure for download (overview_fig is already closed above)
+            download_fig = make_overview_figure(output_data, scores, mode, uploaded_file.name)
+            png_bytes = fig_to_png(download_fig)
+            plt.close(download_fig)
             st.download_button(
                 label="📥 Overview plot (.png)",
                 data=png_bytes,
