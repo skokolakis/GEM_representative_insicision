@@ -17,7 +17,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.interpolate import CubicSpline, make_interp_spline
+from scipy.interpolate import (
+    Akima1DInterpolator,
+    CubicSpline,
+    PchipInterpolator,
+    make_interp_spline,
+)
+from numpy.polynomial.polynomial import polyfit, polyval
 
 # ---------------------------------------------------------------------------
 # Configuration (all in one place, easily overridden via Streamlit widgets)
@@ -31,6 +37,8 @@ MODES = {
     "EC": "Mean EC Response (S/m)",
     "MS": "Mean MS Response (10⁻⁵ SI)",
 }
+
+ALL_INTERP_METHODS = ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"]
 
 LINE_STYLES = {
     "Solid": "-",
@@ -224,6 +232,60 @@ def process_gem_file(
 
 
 # ---------------------------------------------------------------------------
+# Interpolation helpers
+# ---------------------------------------------------------------------------
+
+# Minimum point requirements per method
+_METHOD_MIN_POINTS = {
+    "linear": 2,
+    "nearest": 1,
+    "pchip": 2,
+    "quadratic": 3,
+    "polynomial": 3,
+    "akima": 5,
+    "cubic": 4,
+}
+
+
+def _interpolate_with_method(
+    xp: np.ndarray, yp: np.ndarray, target_x: np.ndarray, method: str
+) -> np.ndarray:
+    """Interpolate *yp* at *xp* onto *target_x* using the named method."""
+    if method == "linear":
+        return np.interp(target_x, xp, yp)
+
+    if method == "nearest":
+        idx = np.searchsorted(xp, target_x, side="left")
+        idx_left = np.clip(idx - 1, 0, len(xp) - 1)
+        idx_right = np.clip(idx, 0, len(xp) - 1)
+        nearest = np.where(
+            np.abs(target_x - xp[idx_left]) <= np.abs(target_x - xp[idx_right]),
+            idx_left,
+            idx_right,
+        )
+        return yp[nearest]
+
+    if method == "pchip":
+        return PchipInterpolator(xp, yp)(target_x)
+
+    if method == "quadratic":
+        return make_interp_spline(xp, yp, k=2)(target_x)
+
+    if method == "polynomial":
+        degree = min(len(xp) - 1, 5)
+        coeffs = polyfit(xp, yp, degree)
+        return polyval(target_x, coeffs)
+
+    if method == "akima":
+        return Akima1DInterpolator(xp, yp)(target_x)
+
+    if method == "cubic":
+        return CubicSpline(xp, yp)(target_x)
+
+    raise ValueError(f"Unknown interpolation method: {method!r}")
+
+
+# ---------------------------------------------------------------------------
 # Core processing (pure functions — no side effects, no sys.exit)
 # ---------------------------------------------------------------------------
 
@@ -296,29 +358,13 @@ def process_sheet(
         yp = df_xy["y"].values
 
         try:
-            if interp_kind == "linear":
-                interpolated_lines[col] = np.interp(common_dist, xp, yp)
-            elif interp_kind == "nearest":
-                idx = np.searchsorted(xp, common_dist, side="left")
-                idx_left = np.clip(idx - 1, 0, len(xp) - 1)
-                idx_right = np.clip(idx, 0, len(xp) - 1)
-                nearest = np.where(
-                    np.abs(common_dist - xp[idx_left]) <= np.abs(common_dist - xp[idx_right]),
-                    idx_left,
-                    idx_right,
+            min_pts = _METHOD_MIN_POINTS.get(interp_kind, 2)
+            if len(xp) < min_pts:
+                col_warnings.append(
+                    f"column '{col}': need ≥{min_pts} points for {interp_kind} interpolation, skipped"
                 )
-                interpolated_lines[col] = yp[nearest]
-            elif interp_kind == "quadratic":
-                if len(xp) < 3:
-                    col_warnings.append(
-                        f"column '{col}': need ≥3 points for quadratic interpolation, skipped"
-                    )
-                    continue
-                spl = make_interp_spline(xp, yp, k=2)
-                interpolated_lines[col] = spl(common_dist)
-            elif interp_kind == "cubic":
-                spl = CubicSpline(xp, yp)
-                interpolated_lines[col] = spl(common_dist)
+                continue
+            interpolated_lines[col] = _interpolate_with_method(xp, yp, common_dist, interp_kind)
         except Exception as exc:
             col_warnings.append(f"column '{col}': interpolation failed — {exc}")
             continue
@@ -542,6 +588,183 @@ def build_scores_csv(scores: dict[str, dict]) -> bytes:
     df = pd.DataFrame.from_dict(scores, orient="index")
     df.index.name = "sheet"
     return df.to_csv().encode()
+
+
+def build_batch_xlsx(
+    all_results: list[dict],
+) -> bytes:
+    """
+    Build a single xlsx containing all interpolated data and scores across every
+    uploaded file, mode, and frequency.
+
+    Parameters
+    ----------
+    all_results : list of dicts, each with keys:
+        "stem"        : str  — file stem used for sheet naming
+        "mode"        : str  — "EC" or "MS"
+        "output_data" : dict[freq_or_sheet, interpolated_df]
+        "scores"      : dict[freq_or_sheet, score_dict]
+
+    Workbook layout
+    ---------------
+    Sheet "Scores"   : one row per (file, mode, frequency) with Score/Amplitude/Noise
+    Per (file, mode) : distance column + one mean-profile column per frequency
+    """
+    buf = io.BytesIO()
+    score_rows: list[dict] = []
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for entry in all_results:
+            stem = entry["stem"]
+            mode = entry["mode"]
+            output_data: dict[str, pd.DataFrame] = entry["output_data"]
+            scores: dict[str, dict] = entry["scores"]
+
+            # ── Scores accumulation ──────────────────────────────────────
+            for freq, sc in scores.items():
+                score_rows.append({
+                    "File": stem,
+                    "Mode": mode,
+                    "Frequency / Sheet": freq,
+                    "Score": round(sc["score"], 4),
+                    "Amplitude": round(sc["amplitude"], 6),
+                    "Noise (σ)": round(sc["mean_std"], 6),
+                })
+
+            # ── Interpolated data sheet ──────────────────────────────────
+            if not output_data:
+                continue
+
+            # All frequencies share the same distance grid within a file/mode
+            first_df = next(iter(output_data.values()))
+            dist_col = first_df.index.values
+
+            data_sheet: dict[str, np.ndarray] = {"Distance (m)": dist_col}
+            for freq, interp_df in output_data.items():
+                rep_prof = interp_df.mean(axis=1, skipna=True).values
+                col_label = f"{freq[:20]}_mean"
+                data_sheet[col_label] = rep_prof
+
+            data_df = pd.DataFrame(data_sheet)
+
+            # Sheet name: "{stem}_{mode}", truncated to 31 chars
+            raw_sheet = f"{stem}_{mode}"
+            sheet_name = raw_sheet[:EXCEL_SHEET_NAME_MAX]
+            # Deduplicate sheet names (multiple files could share a stem)
+            existing = writer.sheets.keys()
+            suffix = 2
+            candidate = sheet_name
+            while candidate in existing:
+                tag = f"_{suffix}"
+                candidate = raw_sheet[: EXCEL_SHEET_NAME_MAX - len(tag)] + tag
+                suffix += 1
+            sheet_name = candidate
+
+            data_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        # ── Scores sheet (written last so it sorts first in openpyxl order) ──
+        if score_rows:
+            scores_df = pd.DataFrame(score_rows)
+            scores_df.to_excel(writer, sheet_name="Scores", index=False)
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_all_methods_batch_xlsx(
+    uploaded_files: list,
+    mode: str,
+    distance_step: float,
+) -> bytes:
+    """
+    Run every interpolation method against every uploaded file and pack all
+    interpolated profiles and scores into a single xlsx.
+
+    Workbook layout
+    ---------------
+    Sheet "Scores"            : File | Mode | Frequency | Method | Score | Amplitude | Noise(σ)
+    "{stem}_{mode}_{method}"  : Distance (m) + one {freq}_mean column per frequency
+    """
+    buf = io.BytesIO()
+    score_rows: list[dict] = []
+
+    def _unique_sheet(name: str, existing: "KeysView[str]") -> str:
+        """Truncate to 31 chars and deduplicate."""
+        candidate = name[:EXCEL_SHEET_NAME_MAX]
+        suffix = 2
+        while candidate in existing:
+            tag = f"_{suffix}"
+            candidate = name[: EXCEL_SHEET_NAME_MAX - len(tag)] + tag
+            suffix += 1
+        return candidate
+
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for uploaded_file in uploaded_files:
+            file_bytes = uploaded_file.getvalue()
+            file_name = uploaded_file.name
+            stem = Path(file_name).stem
+
+            # Detect format once
+            is_gem = False
+            try:
+                if file_name.lower().endswith(".csv"):
+                    probe = pd.read_csv(io.BytesIO(file_bytes), nrows=5)
+                else:
+                    probe = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, nrows=5)
+                is_gem = is_gem_format(probe)
+            except Exception:
+                pass
+
+            for method in ALL_INTERP_METHODS:
+                # Retrieve processed data (uses @st.cache_data — free if already computed)
+                if is_gem:
+                    out, sc, _ = process_gem_file(file_bytes, file_name, distance_step, method)
+                    entries = [
+                        (mode_key, out[mode_key], sc[mode_key])
+                        for mode_key in ("EC", "MS")
+                        if out.get(mode_key)
+                    ]
+                else:
+                    out, sc, _ = process_file(file_bytes, mode, distance_step, method)
+                    entries = [(mode, out, sc)] if out else []
+
+                for mode_key, output_data, scores in entries:
+                    # Scores rows
+                    for freq, metrics in scores.items():
+                        score_rows.append({
+                            "File": stem,
+                            "Mode": mode_key,
+                            "Frequency / Sheet": freq,
+                            "Method": method,
+                            "Score": round(metrics["score"], 4),
+                            "Amplitude": round(metrics["amplitude"], 6),
+                            "Noise (σ)": round(metrics["mean_std"], 6),
+                        })
+
+                    # Data sheet: Distance + one mean column per frequency
+                    if not output_data:
+                        continue
+                    first_df = next(iter(output_data.values()))
+                    data: dict[str, np.ndarray] = {"Distance (m)": first_df.index.values}
+                    for freq, interp_df in output_data.items():
+                        data[f"{freq[:18]}_mean"] = interp_df.mean(axis=1, skipna=True).values
+
+                    raw = f"{stem[:10]}_{mode_key}_{method}"
+                    sheet_name = _unique_sheet(raw, writer.sheets.keys())
+                    pd.DataFrame(data).to_excel(writer, sheet_name=sheet_name, index=False)
+
+        # Scores summary — written last (openpyxl appends; reorder below)
+        if score_rows:
+            pd.DataFrame(score_rows).to_excel(writer, sheet_name="Scores", index=False)
+
+    # Move "Scores" sheet to the first position
+    wb = __import__("openpyxl").load_workbook(io.BytesIO(buf.getvalue()))
+    if "Scores" in wb.sheetnames:
+        wb.move_sheet("Scores", offset=-len(wb.sheetnames) + 1)
+    out_buf = io.BytesIO()
+    wb.save(out_buf)
+    out_buf.seek(0)
+    return out_buf.getvalue()
 
 
 def fig_to_png(fig: plt.Figure) -> bytes:
@@ -936,7 +1159,7 @@ def main():
 
         interp_kind = st.selectbox(
             "Interpolation method",
-            ["linear", "cubic", "nearest", "quadratic"],
+            ["linear", "cubic", "nearest", "quadratic", "pchip", "akima", "polynomial"],
             index=0,
         )
 
@@ -953,7 +1176,7 @@ def main():
         with st.expander("ℹ️ About", expanded=False):
             st.markdown(
                 """
-**Representative Incision Tool** — v2.0
+**Representative Incision Tool** — v2.1
 
 #### Geophysical background
 
@@ -1101,15 +1324,33 @@ field data.
 | Step | What happens |
 |---|---|
 | **1. Ingest** | File is read (CSV or XLSX). GEM format is auto-detected from column names (`Line`, `Y`, `EC*Hz[mS/m]`, `MSusc*Hz[1/1000]`). The flat GEM table is pivoted: each frequency becomes a matrix with distance as rows and survey lines as columns. |
-| **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). Available methods: linear, nearest-neighbour, quadratic spline, and cubic spline. Duplicate distance values are averaged before interpolation. |
+| **2. Interpolate** | All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`). The interpolation method is chosen from the sidebar (see *Interpolation methods* below). Duplicate distance values are averaged before interpolation. |
 | **3. Score** | The mean profile and noise metric are computed as above. Frequencies are ranked by descending score. |
 | **4. Visualise** | An overview plot shows all mean profiles together. Per-frequency plots show individual traces (thin, semi-transparent), the mean profile (bold), and the ±1σ envelope. |
-| **5. Export** | A scored summary table and the interpolated profiles are available for download as XLSX. |
+| **5. Export** | Per-file downloads (interpolated profiles XLSX, scores CSV, overview PNG) and a **Batch Export** that packages results from all uploaded files into a single XLSX. A second batch option runs all interpolation methods simultaneously and exports every result for direct comparison. |
 
 > **Precision note:** GEM CSV exports round EC values to integers
 > and MS to one decimal place, discarding the instrument's full
 > precision (3+ decimal places available in the XLSX). For
 > quantitative frequency comparison, always use the XLSX export.
+
+---
+
+#### Interpolation methods
+
+Seven methods are available from the sidebar dropdown. Each is applied uniformly to all traces within the selected file.
+
+| Method | Min. points | Characteristics |
+|---|---|---|
+| **linear** | 2 | Piecewise linear connection between data points. Conservative, no overshoot. Recommended for noisy or sparse data. |
+| **nearest** | 1 | Assigns each grid point the value of the closest data point. Useful for step-like or categorical-style signals. |
+| **quadratic** | 3 | Quadratic B-spline (`make_interp_spline`, k = 2). Smoother than linear with modest curvature. |
+| **cubic** | 4 | Cubic spline with continuous second derivative (`CubicSpline`). Best for dense, smooth, low-noise profiles. May overshoot at sharp boundaries. |
+| **pchip** | 2 | Piecewise Cubic Hermite Interpolating Polynomial. Shape-preserving and monotone within each interval — avoids the overshoot of cubic splines. Good default for near-monotone geophysical profiles. |
+| **akima** | 5 | Akima (1970) local spline. Uses only neighbouring points to set slopes, making it robust to isolated outliers that would disturb a global cubic spline. |
+| **polynomial** | 3 | Global least-squares polynomial fit (degree = min(n − 1, 5)). Suitable for very smooth, low-point-count profiles; avoid for long profiles where Runge oscillations can appear. |
+
+The **Batch Export — all methods** option runs all seven methods in one step and writes a single XLSX whose `Scores` sheet lists every (file, mode, frequency, method) combination side-by-side for direct comparison.
 
 ---
 
@@ -1139,6 +1380,9 @@ field data.
 | **σ_noise** | Population std across traces (multi-pass) or residual std from smoother (single-pass) |
 | **ddof = 0** | Population standard deviation; used because the survey passes are the full measurement ensemble, not a sample |
 | **Representative incision** | A transect designed to sample the full range of subsurface variability at a site |
+| **PCHIP** | Piecewise Cubic Hermite Interpolating Polynomial — shape-preserving spline that avoids overshoot |
+| **Akima spline** | Local spline that derives slopes from neighbouring points only, reducing sensitivity to outliers |
+| **Batch export** | Single XLSX download packaging interpolated profiles and scores from all uploaded files |
 
 ---
 
@@ -1183,6 +1427,16 @@ field data.
   Signal-to-noise ratio computation for challenging land data.
   *Geophys. Prospect.*, **70**, 629–638.
   [doi:10.1111/1365-2478.13183](https://doi.org/10.1111/1365-2478.13183)
+
+- Akima, H. (1970). A new method of interpolation and smooth
+  curve fitting based on local procedures. *J. ACM*, **17**(4),
+  589–602.
+  [doi:10.1145/321607.321609](https://doi.org/10.1145/321607.321609)
+
+- Fritsch, F.N. & Carlson, R.E. (1980). Monotone piecewise
+  cubic interpolation. *SIAM J. Numer. Anal.*, **17**(2),
+  238–246.
+  [doi:10.1137/0717021](https://doi.org/10.1137/0717021)
                 """
             )
 
@@ -1197,7 +1451,93 @@ field data.
         st.info("Upload at least one `.xlsx` or `.csv` file to get started.")
         return
 
-    # ── Process each file ───────────────────────────────────────────────────
+    # ── Process each file and accumulate results for batch export ──────────
+    batch_results: list[dict] = []
+
+    for uploaded_file in uploaded_files:
+        file_bytes = uploaded_file.getvalue()
+        file_name = uploaded_file.name
+        stem = Path(file_name).stem
+
+        # Probe for GEM format (read only 5 rows for speed)
+        is_gem = False
+        try:
+            if file_name.lower().endswith(".csv"):
+                probe = pd.read_csv(io.BytesIO(file_bytes), nrows=5)
+            else:
+                probe = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0, nrows=5)
+            is_gem = is_gem_format(probe)
+        except Exception:
+            pass
+
+        # Collect processed data (cached — no extra computation cost)
+        if is_gem:
+            gem_output, gem_scores, _ = process_gem_file(
+                file_bytes, file_name, distance_step, interp_kind
+            )
+            for mode_key in ("EC", "MS"):
+                if gem_output.get(mode_key):
+                    batch_results.append({
+                        "stem": stem,
+                        "mode": mode_key,
+                        "output_data": gem_output[mode_key],
+                        "scores": gem_scores[mode_key],
+                    })
+        else:
+            leg_output, leg_scores, _ = process_file(
+                file_bytes, mode, distance_step, interp_kind
+            )
+            if leg_output:
+                batch_results.append({
+                    "stem": stem,
+                    "mode": mode,
+                    "output_data": leg_output,
+                    "scores": leg_scores,
+                })
+
+    # ── Batch download (shown once, above per-file results) ────────────────
+    if batch_results:
+        st.divider()
+        st.markdown("### 📦 Batch Export")
+
+        dl_col1, dl_col2 = st.columns(2)
+
+        with dl_col1:
+            st.caption(
+                f"Interpolated profiles & scores for the **selected method** "
+                f"({interp_kind}) across {len(uploaded_files)} file(s)."
+            )
+            batch_bytes = build_batch_xlsx(batch_results)
+            st.download_button(
+                label=f"📥 Download — {interp_kind} method (.xlsx)",
+                data=batch_bytes,
+                file_name=f"batch_{interp_kind}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_batch",
+            )
+
+        with dl_col2:
+            st.caption(
+                f"Interpolated profiles & scores for **all {len(ALL_INTERP_METHODS)} methods** "
+                f"across {len(uploaded_files)} file(s). May take a moment to generate."
+            )
+            if st.button("⚙️ Generate all-methods export", key="btn_all_methods"):
+                with st.spinner(
+                    f"Running {len(ALL_INTERP_METHODS)} interpolation methods "
+                    f"across {len(uploaded_files)} file(s)…"
+                ):
+                    all_methods_bytes = build_all_methods_batch_xlsx(
+                        uploaded_files, mode, distance_step
+                    )
+                st.download_button(
+                    label="📥 Download — all methods (.xlsx)",
+                    data=all_methods_bytes,
+                    file_name="batch_all_methods.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_all_methods",
+                )
+
+    # ── Per-file detailed results ───────────────────────────────────────────
     for uploaded_file in uploaded_files:
         st.divider()
         st.subheader(f"📄 {uploaded_file.name}")
@@ -1205,7 +1545,6 @@ field data.
         file_bytes = uploaded_file.getvalue()
         file_name = uploaded_file.name
 
-        # Probe for GEM format (read only 5 rows for speed)
         is_gem = False
         try:
             if file_name.lower().endswith(".csv"):
