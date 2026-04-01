@@ -1,5 +1,3 @@
-# RIs.py — UltraRank Frequency Analysis (CLI)
-
 ## Overview
 
 **RIs.py** is a command-line tool for analysing multi-frequency electromagnetic induction (EMI) survey data from legacy multi-sheet XLSX files. It ranks frequencies by signal-to-noise score to identify the most representative operating frequency for EC or MS profiling.
