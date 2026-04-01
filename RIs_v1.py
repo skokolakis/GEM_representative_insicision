@@ -7,7 +7,6 @@ Unified ultrankfrq controller
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.interpolate import interp1d
 from pathlib import Path
 import sys
 
@@ -80,7 +79,8 @@ def run_ultrankfrq(mode="EC"):
             if not np.isfinite(min_dist) or not np.isfinite(max_dist) or (max_dist - min_dist) < COMMON_DISTANCE_STEP:
                 continue
 
-            common_dist = np.arange(min_dist, max_dist + COMMON_DISTANCE_STEP, COMMON_DISTANCE_STEP)
+            n_points = int(round((max_dist - min_dist) / COMMON_DISTANCE_STEP)) + 1
+            common_dist = np.linspace(min_dist, max_dist, n_points)
 
             interpolated_lines = {}
 
@@ -92,23 +92,23 @@ def run_ultrankfrq(mode="EC"):
                     continue
 
                 df_xy = pd.DataFrame({"d": distance[mask], "y": y[mask]})
-                df_grouped = df_xy.groupby("d", as_index=False).mean().sort_values("d")
+                df_grouped = (
+                    df_xy.groupby("d", as_index=False)
+                    .mean()
+                    .sort_values("d")
+                    .drop_duplicates(subset="d")
+                )
 
                 if df_grouped.shape[0] < 2:
                     continue
 
-                try:
-                    f = interp1d(
-                        df_grouped["d"].values,
-                        df_grouped["y"].values,
-                        kind=INTERP_KIND,
-                        bounds_error=False,
-                        fill_value=np.nan,
-                        assume_sorted=True
-                    )
-                    interpolated_lines[col] = f(common_dist)
-                except Exception:
+                if not df_grouped["d"].is_monotonic_increasing:
+                    print(f"  Warning: column '{col}' distance not monotonic after dedup, skipped.")
                     continue
+
+                xp = df_grouped["d"].values
+                yp = df_grouped["y"].values
+                interpolated_lines[col] = np.interp(common_dist, xp, yp)
 
             if not interpolated_lines:
                 continue
@@ -116,11 +116,18 @@ def run_ultrankfrq(mode="EC"):
             interpolated_df = pd.DataFrame(interpolated_lines, index=common_dist)
 
             rep_prof = interpolated_df.mean(axis=1, skipna=True)
-            std_prof = interpolated_df.std(axis=1, skipna=True)
+            std_prof = interpolated_df.std(axis=1, skipna=True, ddof=0)
 
             mean_std = float(std_prof.mean())
             amplitude = float(np.nanmax(rep_prof) - np.nanmin(rep_prof))
-            score = amplitude / max(mean_std, SCORE_EPSILON)
+            if np.isnan(mean_std) or mean_std < SCORE_EPSILON:
+                window = max(5, len(rep_prof) // 10)
+                smoothed = rep_prof.rolling(window=window, center=True, min_periods=1).mean()
+                intra_noise = float((rep_prof - smoothed).std())
+                mean_std = intra_noise
+                score = amplitude / intra_noise if intra_noise >= SCORE_EPSILON else amplitude
+            else:
+                score = amplitude / mean_std
 
             representativeness_scores[sheet_name] = {
                 "mean_std": mean_std,
