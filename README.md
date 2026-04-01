@@ -1,195 +1,169 @@
-# GEM_representative_insicision
+# RIs.py — UltraRank Frequency Analysis (CLI)
 
-Unified ultra-rank-frequency controller for generating representative profiles from geophysical (EC/MS) line measurements.
+## Overview
 
-This repository contains `RIs_v1.py`, a script that:
-- Reads .xlsx files containing distance vs. measurement traces (one or more traces per sheet),
-- Interpolates all traces onto a common distance grid,
-- Computes a representative (mean) profile per sheet,
-- Computes a representativeness score per sheet (amplitude / mean standard deviation),
-- Writes interpolated profiles, scores, and representative-profile plots to an output folder.
+**RIs.py** is a command-line tool for analysing multi-frequency electromagnetic induction (EMI) survey data from legacy multi-sheet XLSX files. It ranks frequencies by signal-to-noise score to identify the most representative operating frequency for EC or MS profiling.
 
----
-
-## Table of contents
-
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Input format](#input-format)
-- [Configuration](#configuration)
-- [Usage](#usage)
-  - [Interactive mode (default)](#interactive-mode-default)
-  - [Programmatic / headless usage](#programmatic--headless-usage)
-- [Outputs](#outputs)
-- [How the representativeness score is computed](#how-the-representativeness-score-is-computed)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License & contact](#license--contact)
+It is the command-line predecessor to **RIs_v2.py** (Streamlit web app) and shares the same core scoring logic. Use it when you need a quick, scriptable, no-browser workflow.
 
 ---
 
 ## Requirements
 
-- Python 3.8+
-- Packages:
-  - pandas
-  - numpy
-  - matplotlib
-  - scipy
-  - openpyxl
-
-You can install the required packages with:
+- Python 3.9+
+- `pandas`, `numpy`, `matplotlib`, `scipy`, `openpyxl`
 
 ```bash
-python -m pip install pandas numpy matplotlib scipy openpyxl
+pip install pandas numpy matplotlib scipy openpyxl
 ```
-
-(or create a virtual environment first)
-
----
-
-## Installation
-
-1. Clone the repository (if not already present):
-   ```bash
-   git clone https://github.com/skokolakis/GEM_representative_insicision.git
-   cd GEM_representative_insicision
-   ```
-
-2. Install requirements as shown above.
-
----
-
-## Input format
-
-- Place one or more Excel files (`*.xlsx`) in the working directory (or change the INPUT_FOLDER in the script).
-- Each Excel file may contain multiple sheets.
-- Each sheet should have:
-  - First column: distance values (numeric), in meters.
-  - Remaining columns: measurement traces (one trace per column). These typically are different frequencies or channels.
-- The script ignores temporary Excel files whose names start with `~$`.
-
-Notes:
-- Rows with NaN distance or NaN measurement values will be handled (masked) during interpolation.
-- If a trace has fewer than 2 valid points it will be skipped.
-
----
-
-## Configuration
-
-Configuration variables are defined at the top of `RIs_v1.py`:
-
-- `COMMON_DISTANCE_STEP` (default: 0.5) — step used for the common distance grid (meters).
-- `INTERP_KIND` (default: `"linear"`) — interpolation kind passed to `scipy.interpolate.interp1d` (e.g., `"linear"`, `"nearest"`, `"cubic"`).
-- `INPUT_FOLDER` (default: `Path(".")`) — folder to search for `.xlsx` files.
-- `OUTPUT_FOLDER` (default: `Path("output_profiles")`) — folder where outputs will be written.
-- `SCORE_EPSILON` (default: `1e-8`) — small value to avoid division by zero in score computation.
-
-Edit those variables directly in `RIs_v1.py` if you want different behavior.
 
 ---
 
 ## Usage
 
-### Interactive mode (default)
-Run the script directly:
-
 ```bash
-python RIs_v1.py
+python RIs.py
 ```
 
-You'll get a simple control panel:
+The interactive control panel presents three options:
 
-1) Run EC data script  
-2) Run MS data script  
+```
+===== Script Control Panel =====
+1) Run EC data script
+2) Run MS data script
 Q) Quit
-
-Pick `1` or `2` to process files in EC or MS mode respectively.
-
-### Programmatic / headless usage
-
-You can call the core function from another script or from a one-liner:
-
-```bash
-python -c "from RIs_v1 import run_ultrankfrq; run_ultrankfrq('EC')"
 ```
 
-Or in a Python interpreter:
+After selecting a mode you are prompted to choose an interpolation method:
 
-```python
-from RIs_v1 import run_ultrankfrq
-run_ultrankfrq("MS")
+```
+  Interpolation method:
+    1) linear
+    2) cubic
+    3) nearest
+    4) quadratic
+    5) pchip
+    6) akima
+    7) polynomial
+  Select method [1-7, default=1 linear]:
 ```
 
-If running on a headless server where matplotlib has no display, ensure the `Agg` backend is used before import/plots (or modify the script):
+Press **Enter** to accept the default (linear). The script then processes every `.xlsx` file found in the current working directory and writes results to `output_profiles/`.
 
-```python
-import matplotlib
-matplotlib.use("Agg")
-from RIs_v1 import run_ultrankfrq
-run_ultrankfrq("EC")
+---
+
+## Input format
+
+RIs.py expects **legacy multi-sheet XLSX files** placed in the same directory as the script:
+
+| Element | Requirement |
+|---|---|
+| File location | Same folder as `RIs.py` (current working directory) |
+| File format | `.xlsx` (files beginning with `~$` are ignored) |
+| Sheet structure | One frequency per sheet |
+| Column 0 | Distance along transect (metres, numeric) |
+| Columns 1+ | One column per survey line / trace (numeric) |
+
+Multiple `.xlsx` files are processed in a single run.
+
+---
+
+## Output files
+
+All outputs are written to `output_profiles/` (created automatically).
+
+| File | Content |
+|---|---|
+| `{stem}_{mode}_{method}_interpolated.xlsx` | Interpolated mean profiles — one sheet per frequency, with `Distance (m)` and `{freq}_mean` columns |
+| `{stem}_{mode}_{method}_representativeness_scores.csv` | Per-frequency scores: `mean_std`, `amplitude`, `score` |
+| `{stem}_{mode}_{method}_representative_profiles.png` | Overview plot of all mean profiles, labelled with scores (300 dpi) |
+
+`{stem}` is the input filename without extension, `{mode}` is `EC` or `MS`, and `{method}` is the chosen interpolation method.
+
+---
+
+## Scoring
+
+Each frequency receives a representativeness score:
+
+$$\text{Score} = \frac{A}{\sigma_{\text{noise}}}$$
+
+| Symbol | Meaning |
+|---|---|
+| **A** | Amplitude — peak-to-trough range of the mean profile: max(p̄) − min(p̄) |
+| **σ_noise** | Noise — see below |
+
+**Noise estimation:**
+
+- **Multi-trace (≥ 2 lines):** mean of the point-wise population standard deviation across all traces at each distance step (ddof = 0, because the traces are the full ensemble of survey passes, not a sample).
+- **Single-trace fallback:** residual std after subtracting a rolling-mean smoother (window = max(5, N/10)). This decomposes the signal into a geological trend and a high-frequency noise component.
+- **Near-zero noise:** score falls back to raw amplitude A to avoid numerical instability.
+
+A higher score means the frequency resolves large subsurface contrasts clearly above the noise level — the standard geophysical signal-to-noise criterion.
+
+---
+
+## Interpolation methods
+
+All traces are resampled onto a common evenly-spaced distance grid (`np.linspace`) before averaging.
+
+| Method | Min. points | Notes |
+|---|---|---|
+| **linear** | 2 | Default. Piecewise linear; conservative, no overshoot. |
+| **nearest** | 1 | Step-function; useful for sparse or categorical-style data. |
+| **quadratic** | 3 | Quadratic B-spline; smoother than linear with modest curvature. |
+| **cubic** | 4 | Cubic spline (continuous 2nd derivative); may overshoot sharp boundaries. |
+| **pchip** | 2 | Shape-preserving, monotone within each interval; avoids cubic overshoot. |
+| **akima** | 5 | Local spline using neighbouring slopes; robust to isolated outliers. |
+| **polynomial** | 3 | Global least-squares polynomial (degree ≤ 5); avoid for long profiles. |
+
+Columns with fewer than the required minimum points are skipped and a warning is printed.
+
+---
+
+## Console output
+
+For each processed file the script prints a ranked frequency table:
+
+```
+Frequency Ranking [EC] — H4Keratos_GEM_FREQ_EC
+1. 4525Hz  | Score=18.34 | Std=0.0023 | Amp=0.0421
+2. 9225Hz  | Score=12.71 | Std=0.0031 | Amp=0.0394
+3. 20025Hz | Score= 8.05 | Std=0.0048 | Amp=0.0386
+
+Best Frequency: 4525Hz (Score=18.34)
 ```
 
 ---
 
-## Outputs
+## Configuration
 
-For each processed Excel file, the script writes to `OUTPUT_FOLDER`:
+Hard-coded constants at the top of the file can be edited directly:
 
-- `{base_name}_{mode}_interpolated.xlsx`  
-  - One sheet per original sheet, containing:
-    - `Distance (m)` and `<sheet_name>_mean` (representative profile interpolated onto the common grid).
-- `{base_name}_{mode}_representativeness_scores.csv`  
-  - CSV with columns `mean_std`, `amplitude`, `score` indexed by `sheet`.
-- `{base_name}_{mode}_representative_profiles.png`  
-  - A plot showing representative profiles for all sheets (legend includes score).
-
-Printed console output will show a ranking of sheets by score and the best frequency/sheet.
+| Constant | Default | Effect |
+|---|---|---|
+| `COMMON_DISTANCE_STEP` | `0.5` m | Grid spacing for interpolation |
+| `INPUT_FOLDER` | `.` (current dir) | Where `.xlsx` files are read from |
+| `OUTPUT_FOLDER` | `output_profiles/` | Where results are written |
+| `SCORE_EPSILON` | `1e-8` | Guard against division by zero in scoring |
 
 ---
 
-## How the representativeness score is computed
+## Relationship to other scripts
 
-For each sheet:
-1. Interpolate each trace to the same regular distance grid.
-2. Compute the representative profile as the pointwise mean across traces.
-3. Compute pointwise standard deviation across traces and take the mean of that standard-deviation profile (`mean_std`).
-4. Compute amplitude of the representative profile: max(rep_prof) - min(rep_prof) (`amplitude`).
-5. Score = amplitude / max(mean_std, SCORE_EPSILON).
+| Script | Interface | Format support | Interpolation |
+|---|---|---|---|
+| `RIs_v1.py` | CLI | Legacy XLSX only | Linear only |
+| **`RIs.py`** | CLI | Legacy XLSX only | All 7 methods |
+| `RIs_v2.py` | Streamlit web app | Legacy XLSX + GEM CSV/XLSX | All 7 methods |
 
-Interpretation: higher score means the representative profile has a larger amplitude relative to inter-trace variability, i.e., more "distinct" and consistent signal.
-
----
-
-## Troubleshooting
-
-- "No .xlsx files found in input folder"  
-  - Ensure Excel files exist in the current working directory, or change `INPUT_FOLDER`.
-
-- Excel open errors when writing (`PermissionError`)  
-  - Make sure output files are not open in Excel while the script runs.
-
-- Missing backends / plotting errors on servers  
-  - Use the `Agg` backend (see above).
-
-- Interpolation returns NaNs or no interpolated lines  
-  - Check that sheets have at least two valid (distance, value) pairs per trace, and that distance spans more than `COMMON_DISTANCE_STEP`.
-
-- If you need to support additional Excel engines, ensure `openpyxl` or other engines are installed.
+`RIs.py` is the CLI-equivalent of `RIs_v2.py` for legacy-format files, adding the full interpolation method menu absent from `RIs_v1.py`.
 
 ---
 
-## Contributing
+## References
 
-- If you want to add features (e.g., CLI arguments, more robust file discovery, unit tests, or alternative scoring), please open an issue or submit a PR.
-- Suggested enhancements:
-  - Add CLI flags (argparse) for `INPUT_FOLDER`, `OUTPUT_FOLDER`, `COMMON_DISTANCE_STEP`, `INTERP_KIND`, and mode.
-  - Allow saving all per-trace interpolated results in the output Excel for debugging.
-  - Add unit tests for interpolation and scoring logic.
-
----
-
-## License & contact
-
-- License: MIT (you can add a LICENSE file to the repo if desired).
-- Author / maintainer: skokolakis — open an issue or reach out via GitHub: [skokolakis](https://github.com/skokolakis)
+- Won, I.J. et al. (1996). GEM-2: A new multifrequency electromagnetic sensor. *J. Environ. Eng. Geophys.*, **1**(2), 129–137. https://doi.org/10.4133/JEEG1.2.129
+- McNeill, J.D. (1980). *Electromagnetic terrain conductivity measurement at low induction numbers*. Technical Note TN-6, Geonics Limited.
+- Callegary, J.B., Ferré, T.P.A. & Groom, R.W. (2007). Vertical spatial sensitivity and exploration depth of low-induction-number EMI instruments. *Vadose Zone J.*, **6**(1), 158–167. https://doi.org/10.2136/vzj2006.0120
+- Sheriff, R.E. & Geldart, L.P. (1995). *Exploration Seismology* (2nd ed.). Cambridge University Press.
